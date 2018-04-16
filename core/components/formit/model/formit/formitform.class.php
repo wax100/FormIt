@@ -8,9 +8,12 @@ class FormItForm extends xPDOSimpleObject
     private $encryptKey;
     private $ivKey;
     private $method = 'AES-256-CBC';
+    public $storeAttachmentPath;
+    public $storeAttachments = false;
 
-    function __construct(& $xpdo) {
-        parent :: __construct($xpdo);
+
+    function __construct(& $xpdo)    {
+        parent:: __construct($xpdo);
         $this->setSecretKeys();
     }
 
@@ -23,6 +26,7 @@ class FormItForm extends xPDOSimpleObject
         $value = base64_encode(openssl_encrypt($value, $this->method, $this->encryptKey, 0, $this->ivKey));
         return $value;
     }
+
     public function decrypt($value, $type = 2)
     {
         /* Check for encryption type; 1 = old mcrypt method */
@@ -49,12 +53,14 @@ class FormItForm extends xPDOSimpleObject
         /* Return default openssl decrypted values */
         return openssl_decrypt(base64_decode($value), $this->method, $this->encryptKey, 0, $this->ivKey);
     }
+
     public function generatePseudoRandomHash($bytes = 16)
     {
         $hash = bin2hex(openssl_random_pseudo_bytes($bytes, $strong));
         if (!$strong) {
             $hash = $this->generatePseudoRandomHash($bytes);
         }
+
         return $hash;
     }
 
@@ -65,7 +71,7 @@ class FormItForm extends xPDOSimpleObject
             $encryptkey = $this->xpdo->site_id;
             $setting = $this->xpdo->getObject(
                 'modSystemSetting',
-                array('key' => 'formit.form_encryptkey', 'namespace' => 'formit')
+                ['key' => 'formit.form_encryptkey', 'namespace' => 'formit']
             );
             if (!$setting) {
                 $setting = $this->xpdo->newObject('modSystemSetting');
@@ -78,5 +84,146 @@ class FormItForm extends xPDOSimpleObject
         $this->oldEncryptKey = $encryptkey;
         $this->encryptKey = hash('sha256', $encryptkey);
         $this->ivKey = substr(hash('sha256', md5($encryptkey)), 0, 16);
+    }
+
+    public function validateStoreAttachment($config)
+    {
+        $error = '';
+        $mediasourceId = $this->xpdo->getOption('formit.attachment.mediasource');
+        $mediasource = $this->xpdo->getObject('modMediaSource', $mediasourceId);
+        if (!$mediasource) {
+            $error = $this->xpdo->lexicon('formit.storeAttachment_mediasource_error');
+        } else {
+            $prop = $mediasource->get('properties');
+            $path = $prop['basePath']['value'] . $this->xpdo->getOption('formit.attachment.path');
+            if (!is_dir(MODX_BASE_PATH . $path)) {
+                $error = $this->xpdo->lexicon('formit.storeAttachment_path_error');
+            } else {
+                if (!is_writable($path)) {
+                    $error = $this->xpdo->lexicon('formit.storeAttachment_access_error');
+                } else {
+                    // $config['storeAttachment_path'] = $path;
+                    $this->xpdo->setPlaceholder($config['placeholderPrefix'] . 'storeAttachment_path', $path);
+                }
+            }
+        }
+
+        if (empty($error)) {
+            $this->storeAttachments = true;
+        } else {
+            $this->storeAttachments = false;
+            $this->xpdo->log(MODx::LOG_LEVEL_ERROR, '[FormIt] ' . $error);
+        }
+        $this->xpdo->setPlaceholder($config['placeholderPrefix'] . 'error.storeAttachment', $error);
+
+        //$config['storeAttachment_error'] = $this->storeAttachments;
+        return $this->storeAttachments;
+    }
+
+    public function storeAttachments($config)
+    {
+        if ($this->xpdo->getPlaceholder($config['placeholderPrefix'] . 'error.storeAttachment') == '') {
+            $path = $this->xpdo->getPlaceholder($config['placeholderPrefix'] . 'storeAttachment_path');
+            $old_data = $this->xpdo->fromJSON($this->values);
+            $site_url = $this->xpdo->getOption('site_url');
+            foreach ($_FILES as $key => $value) {
+
+                if (is_array($value['name'])) {
+                    foreach ($value['name'] as $fKey => $fValue) {
+                        $file = $this->saveFile(
+                            $key . '_' . $fKey,
+                            $value['name'][$fKey],
+                            $value['tmp_name'][$fKey],
+                            $value['error'][$fKey],
+                            $path
+                        );
+                        $data[$key][] = "<a target='_blank' href='" .$site_url. $file . "'>" . $value['name'][$fKey] . '</a>';
+                    }
+                } else {
+                    $file = $this->saveFile(
+                        $key,
+                        $value['name'],
+                        $value['tmp_name'],
+                        $value['error'],
+                        $path
+                    );
+                    $data[$key][] = "<a target='_blank' href='" .$site_url. $file . "'>" . $value['name'] . '</a>';
+                }
+                /*var_dump($key);
+                 var_dump($old_data);
+                var_dump($data);
+                exit();*/
+
+                $old_data[$key] = $data[$key];
+                $new_data = $this->xpdo->toJSON($old_data);
+                // var_dump($new_data);
+
+                $this->set('values', $new_data);
+                $this->save();
+            }
+
+        }
+    }
+
+    public function saveFile($key, $name, $tmp_name, $error, $path)
+    {
+        $info = pathinfo($name);
+        $ext = $info['extension'];
+        $ext = strtolower($ext);
+
+        if ($error !== 0) {
+            $this->xpdo->log(MODx::LOG_LEVEL_ERROR, '[FormItSaveForm] ' . $this->xpdo->lexicon('formit.storeAttachment_file_upload_error'));
+            return;
+        }
+        $allowedFileTypes = array_merge(
+            explode(',', $this->xpdo->getOption('upload_images')),
+            explode(',', $this->xpdo->getOption('upload_media')),
+            explode(',', $this->xpdo->getOption('upload_flash')),
+            explode(',', $this->xpdo->getOption('upload_files', null, ''))
+        );
+        $allowedFileTypes = array_unique($allowedFileTypes);
+
+        /* Make sure that dangerous file types are not allowed */
+        unset(
+            $allowedFileTypes['php'],
+            $allowedFileTypes['php4'],
+            $allowedFileTypes['php5'],
+            $allowedFileTypes['htm'],
+            $allowedFileTypes['html'],
+            $allowedFileTypes['phtml'],
+            $allowedFileTypes['js'],
+            $allowedFileTypes['bin'],
+            $allowedFileTypes['csh'],
+            $allowedFileTypes['out'],
+            $allowedFileTypes['run'],
+            $allowedFileTypes['sh'],
+            $allowedFileTypes['htaccess']
+        );
+
+        /* Check file extension */
+        if (empty($ext) || !in_array($ext, $allowedFileTypes)) {
+            $this->xpdo->log(MODx::LOG_LEVEL_ERROR, '[FormItSaveForm] ' . $this->xpdo->lexicon('formit.storeAttachment_file_ext_error'));
+            return;
+        }
+
+        /* Check filesize */
+        $maxFileSize = $this->xpdo->getOption('upload_maxsize', null, 1048576);
+        $size = filesize($tmp_name);
+        if ($size > $maxFileSize) {
+            $this->xpdo->log(MODx::LOG_LEVEL_ERROR, '[FormItSaveForm] ' . $this->xpdo->lexicon('formit.storeAttachment_file_size_error'));
+            return;
+        }
+
+        $basePath = MODX_BASE_PATH . $path . $this->id . '/';
+
+        if (!is_dir($basePath)) {
+            mkdir($basePath);
+        }
+        //$tmpFileName = md5(session_id() . $key . mt_rand(100, 999)) . '-' . $info['basename'];
+        $target = $basePath . $info['basename'];
+        move_uploaded_file($tmp_name, $target);
+        $_FILES[$key]['tmp_name'] = $target;
+        $_SESSION['formit']['tmp_files'][] = $target;
+        return $path . $this->id . '/' . $info['basename'];
     }
 }

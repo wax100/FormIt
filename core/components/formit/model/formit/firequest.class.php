@@ -130,7 +130,11 @@ class fiRequest {
             ), $this->config['placeholderPrefix']);
 
         }
-        
+
+        if ($this->hasHook('FormItSaveForm') && $this->modx->getOption('storeAttachments', $this->config, true)) {
+            $newForm = $this->modx->newObject('FormItForm');
+            $newForm->validateStoreAttachment($this->config);
+        }
         return $this->runPreHooks();
     }
 
@@ -417,5 +421,7 @@ class fiRequest {
     public function convertMODXTags($v) {
         return str_replace(array('[[',']]'),array('&#91;&#91;','&#93;&#93;'),$v);
     }
+
+
 }
  
